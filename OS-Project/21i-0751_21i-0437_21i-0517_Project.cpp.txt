@@ -1,0 +1,246 @@
+//       Name: Waiz Hassan Zubairi     Roll no. 21I-0751
+//       Name: Fizza Mumtaz            Roll no. 21I-0437
+//       Name: Momina Khalid           Roll no. 21I-0517
+
+#include <iostream>
+#include <cstdlib>
+#include <ctime>
+#include <cmath>
+#include <pthread.h>
+#include <semaphore.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <cstring>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fstream>
+using namespace std;
+
+
+// Global Variables
+const int roomSize = 100;
+const int numRobots = 50;
+const int exitMinWidth = 16;
+const int exitMaxWidth = 26;
+const int proximityThreshold = 5;
+double totalWidth = 0;
+string robotPipes[numRobots];
+
+
+sem_t mutex;  // Semaphore for totalWidth
+sem_t mutex2; // Semaphore for IPC
+pthread_mutex_t mutex3 = PTHREAD_MUTEX_INITIALIZER; // Mutex for printing
+
+
+// For interProcessCommunication
+struct Message
+{
+    int senderId;
+    double estimatedWidth;
+};
+
+// For Robots
+class Robot
+{
+private:
+    int X;
+    int Y;
+    double estimatedWidth;
+
+public:
+    Robot()
+    {
+        X = 0;
+        Y = 0;
+        estimatedWidth = 0;
+    }
+
+    Robot(int x, int y)
+    {
+        X = x;
+        Y = y;
+        estimatedWidth = 0;
+    }
+
+    int getX() const
+    {
+        return X;
+    }
+
+    int getY() const
+    {
+        return Y;
+    }
+
+    double getEstimatedWidth() const
+    {
+        return estimatedWidth;
+    }
+
+    void setX(int x)
+    {
+        X = x;
+    }
+
+    void setY(int y)
+    {
+        Y = y;
+    }
+
+    void setEstimatedWidth(double width)
+    {
+        estimatedWidth = width;
+    }
+};
+
+double calculateDistance(const Robot& robot1, const Robot& robot2) 
+{
+    // Distance Formula
+    float distance = sqrt(pow(robot1.getX() - robot2.getX(), 2) + pow(robot1.getY() - robot2.getY(), 2));
+    return distance;
+}
+
+double estimateExitWidth(const Robot& robot) 
+{
+    // Exit Distance
+    double exitDistance = calculateDistance(robot, Robot{roomSize / 2, roomSize / 2});
+
+    // Returning exit min width on accordance to Exit Distance
+    if (exitDistance <= 5) 
+    {
+        return exitMinWidth + rand() % 21 - 10;
+    } 
+    else if (exitDistance <= 10) 
+    {
+        return exitMinWidth + rand() % 8 - 4;
+    }
+    else 
+    {
+        return exitMinWidth + rand() % 5 - 2;
+    }
+}
+
+Robot *robots;
+    
+void *robotThread(void *arg)
+{
+    Robot *robot = static_cast<Robot *>(arg);
+
+    // Setting exit width
+    robot->setEstimatedWidth(estimateExitWidth(*robot));
+
+
+    // Share estimated width with neighbors using message passing
+    for (int i = 0; i < numRobots; i++)
+    {
+    
+	    // Creating a unique file for each robot
+	    string pipeFileName = robotPipes[i];
+	    ofstream pipeFile(pipeFileName, ios::out | ios::app);
+	    if(!pipeFile.is_open())
+	    {
+		 cout<<"Error: Unable to open file" << pipeFileName<<endl;
+		 return nullptr;    
+	    }
+        if (i != robot->getX() && calculateDistance(*robot, robots[i]) <= proximityThreshold)
+        {
+            // object of message structure
+            Message msg;
+            msg.senderId = robot->getX();                  // setting id
+            msg.estimatedWidth = robot->getEstimatedWidth(); // setting width
+
+            // Critical Section:
+            // Locking before printing
+            pthread_mutex_lock(&mutex3);
+            pipeFile << "Robot at (" << robot->getX() << "," << robot->getY() << ") is sharing information with Robot at (" << robots[i].getX() << "," << robots[i].getY() << ")." << endl<<"Estimated Width is:"<< robot->getX()<<endl;
+            // Unlock after printing
+            pthread_mutex_unlock(&mutex3);
+        }
+            // Close the file
+            pipeFile.close();
+    }
+
+    // Critical Section:
+    // Wait for Semaphore
+    sem_wait(&mutex);
+    totalWidth += robot->getEstimatedWidth();
+    // Release Semaphore
+    sem_post(&mutex);
+
+
+
+    return nullptr;
+}
+
+int main()
+{
+    // Initializing semaphore
+    sem_init(&mutex, 0, 1);
+    sem_init(&mutex2, 0, 1);
+
+    srand(time(0));
+
+    // Creating shared memory
+    int shm_fd = shm_open("robots", O_CREAT | O_RDWR, 0666);
+    ftruncate(shm_fd, numRobots * sizeof(Robot));
+    robots = static_cast<Robot *>(mmap(nullptr, numRobots * sizeof(Robot), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0));
+
+    // Initializing robots with random positions
+    for (int i = 0; i < numRobots; i++)
+    {
+        robots[i].setX(rand() % roomSize);
+        robots[i].setY(rand() % roomSize);
+    }
+    for (int i = 0; i < numRobots; i++) {
+        // Use the std::to_string function to convert the integer index to a string
+        robotPipes[i] = "robot" + std::to_string(i + 1) + "-pipe";
+    }
+    // Creating threads for each robot
+    pthread_t threads[numRobots];
+    for (int i = 0; i < numRobots; i++)
+    {
+        int result = pthread_create(&threads[i], nullptr, robotThread, &robots[i]);
+        if (result != 0)
+        {
+            cout << "Thread creation failed." << endl;
+            return 1;
+        }
+    }
+
+    // threads Joining
+    for (int i = 0; i < numRobots; i++)
+    {
+        int result = pthread_join(threads[i], nullptr);
+        if (result != 0)
+        {
+            cout << "Thread join failed." << endl;
+            return 1;
+        }
+    }
+
+    // Destroy the semaphore
+    sem_destroy(&mutex);
+    sem_destroy(&mutex2);
+
+    // Calculate the global average width
+    double globalAverageWidth = totalWidth / numRobots;
+
+    // Display Estimate Width
+    cout << endl
+         << "Estimated Exit Widths:" << endl
+         << endl;
+    for (int i = 0; i < numRobots; i++)
+    {
+        cout << "Robot " << i + 1 << " at (" << robots[i].getX() << ", " << robots[i].getY()
+             << ") estimated width: " << robots[i].getEstimatedWidth() << endl;
+    }
+
+    cout << "Global Average Exit Width: " << globalAverageWidth << endl;
+
+    // clean memory
+    munmap(robots, numRobots * sizeof(Robot));
+    shm_unlink("robots");
+
+    return 0;
+}
